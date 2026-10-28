@@ -1,0 +1,121 @@
+# Builds a debug APK of the PixelStudio feasibility prototype.
+# NOT yet run on GitHub: the first run may fail on the items listed under "NOT verified" in README.md.
+# If it fails, open the failed step's log and send it back; do not ignore red steps.
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Rust code depends on the unchanged PhotoCraft source in ./photocraft-main.
+      # Put either that folder or photocraft-main.zip (the original archive) in the repo root.
+      - name: Provide upstream PhotoCraft source
+        run: |
+          if [ -d photocraft-main/crates ]; then
+            echo "Using committed photocraft-main/ folder"
+          elif [ -f photocraft-main.zip ]; then
+            unzip -q photocraft-main.zip -d .
+          else
+            echo "::error::Neither photocraft-main/ nor photocraft-main.zip is in the repository root."
+            exit 1
+          fi
+          test -f photocraft-main/Cargo.toml
+          test -d photocraft-main/crates/io
+
+      - name: Install Rust (stable) with Android targets
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Check Rust version (upstream needs 1.95+)
+        run: |
+          rustc --version
+          v=$(rustc --version | awk '{print $2}')
+          if [ "$(printf '%s\n' 1.95.0 "$v" | sort -V | head -n1)" != "1.95.0" ]; then
+            echo "::error::Rust $v is older than the 1.95 that upstream requires."
+            exit 1
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Locate Android NDK
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            echo "::error::No Android NDK found on this runner."
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "Using NDK at $ndk"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # Start from upstream's pinned versions (a copy; upstream's file is not modified).
+      - name: Seed Cargo.lock from upstream
+        run: |
+          if [ ! -f native/Cargo.lock ]; then cp photocraft-main/Cargo.lock native/Cargo.lock; fi
+
+      # Host tests of the JNI-free core. Non-blocking until the first green run proves they are sound.
+      - name: Rust unit tests (host)
+        continue-on-error: true
+        working-directory: native
+        run: cargo test -p photocraft-android-bridge
+
+      - name: Build native library (arm64-v8a, x86_64)
+        working-directory: native
+        run: >
+          cargo ndk
+          --target arm64-v8a --target x86_64
+          --platform 26
+          --output-dir ../android/app/build/rustJniLibs
+          build --release --package photocraft-android-bridge
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # No Gradle wrapper is shipped, so Gradle comes from setup-gradle. Rust was built above.
+      - name: Build debug APK
+        working-directory: android
+        run: gradle :app:assembleDebug -Ppixelstudio.skipRust=true --stacktrace
+
+      - name: Check the native library is inside the APK
+        run: |
+          apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -n1)
+          echo "$apk"
+          unzip -l "$apk" | grep pixelstudio_bridge
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelStudio-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      # Cargo.lock as resolved in CI; commit it to native/ to pin versions for later builds.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resolved-Cargo.lock
+          path: native/Cargo.lock
+          if-no-files-found: warn
