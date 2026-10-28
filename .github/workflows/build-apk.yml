@@ -20,6 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Lets the repository contain the project as an un-extracted zip (handy when uploading from a phone).
+      - name: Provide project sources (unzip if uploaded as a zip)
+        run: |
+          if [ ! -d native ] || [ ! -d android ]; then
+            z=$(ls pixelstudio-feasibility-prototype*.zip 2>/dev/null | head -n1 || true)
+            if [ -z "$z" ]; then
+              echo "::error::native/ and android/ are missing and no pixelstudio-feasibility-prototype*.zip is in the repository root."
+              exit 1
+            fi
+            mkdir -p /tmp/proj
+            unzip -q "$z" -d /tmp/proj
+            src=$(dirname "$(find /tmp/proj -type d -name native | head -n1)")
+            cp -a "$src"/. .
+          fi
+          test -f native/Cargo.toml
+          test -f android/settings.gradle.kts
+
       # The Rust code depends on the unchanged PhotoCraft source in ./photocraft-main.
       # Put either that folder or photocraft-main.zip (the original archive) in the repo root.
       - name: Provide upstream PhotoCraft source
