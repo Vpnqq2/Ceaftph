@@ -1,4 +1,7 @@
-# Builds a debug APK of the PixelStudio feasibility prototype.
+# Builds debug APKs of the PixelStudio feasibility prototype, in two variants:
+#   base   = import/composite/export only (the known-good build)
+#   engine = additionally links the full PhotoCraft engine (--features engine). This is a PROBE: it may
+#            fail to compile for Android; its failure does not fail the workflow. Its log is uploaded.
 # NOT yet run on GitHub: the first run may fail on the items listed under "NOT verified" in README.md.
 # If it fails, open the failed step's log and send it back; do not ignore red steps.
 name: Build APK
@@ -14,8 +17,18 @@ permissions:
 
 jobs:
   apk:
+    name: apk (${{ matrix.variant }})
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+    continue-on-error: ${{ matrix.variant == 'engine' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: base
+            features: ""
+          - variant: engine
+            features: "--features engine"
 
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
+          key: ${{ matrix.variant }}
 
       - uses: actions/setup-java@v4
         with:
@@ -96,18 +110,30 @@ jobs:
 
       # Host tests of the JNI-free core. Non-blocking until the first green run proves they are sound.
       - name: Rust unit tests (host)
+        if: matrix.variant == 'base'
         continue-on-error: true
         working-directory: native
         run: cargo test -p photocraft-android-bridge
 
       - name: Build native library (arm64-v8a, x86_64)
         working-directory: native
-        run: >
-          cargo ndk
-          --target arm64-v8a --target x86_64
-          --platform 26
-          --output-dir ../android/app/build/rustJniLibs
-          build --release --package photocraft-android-bridge
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo ndk \
+            --target arm64-v8a --target x86_64 \
+            --platform 26 \
+            --output-dir ../android/app/build/rustJniLibs \
+            build --release --package photocraft-android-bridge ${{ matrix.features }} \
+            2>&1 | tee ../native-build.log
+
+      - name: Upload native build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-log-${{ matrix.variant }}
+          path: native-build.log
+          if-no-files-found: ignore
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -126,13 +152,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PixelStudio-debug-apk
+          name: PixelStudio-${{ matrix.variant }}-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
       # Cargo.lock as resolved in CI; commit it to native/ to pin versions for later builds.
       - uses: actions/upload-artifact@v4
         with:
-          name: resolved-Cargo.lock
+          name: resolved-Cargo.lock-${{ matrix.variant }}
           path: native/Cargo.lock
           if-no-files-found: warn
